@@ -1,0 +1,71 @@
+name: cs
+
+services:
+  # ── Convex Backend ──────────────────────────────────────────────────────────
+  convexDB-backend:
+    image: ghcr.io/get-convex/convex-backend:latest
+    container_name: cs-convexDB-backend
+    stop_grace_period: 10s
+    stop_signal: SIGINT
+    # Patch the hardcoded internal ports (3210/3211) so localhost:<port> works
+    # from inside the container too (needed for internal URL resolution).
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        sed -i "s/--port 3210/--port $${CS_PORT_CONVEX:-10810}/;s/--site-proxy-port 3211/--site-proxy-port $${CS_PORT_SITE_PROXY:-10815}/" ./run_backend.sh
+        exec ./run_backend.sh
+    ports:
+      - "${CS_PORT_CONVEX:-10810}:${CS_PORT_CONVEX:-10810}"
+      - "${CS_PORT_SITE_PROXY:-10815}:${CS_PORT_SITE_PROXY:-10815}"
+    volumes:
+      - ${SSD_DATA}/classroom.suite/convex:/convex/data
+    environment:
+      - PORT=${CS_PORT_CONVEX:-10810}
+      - SITE_PROXY_PORT=${CS_PORT_SITE_PROXY:-10815}
+      - CONVEX_CLOUD_ORIGIN=${CONVEX_CLOUD_ORIGIN:-http://localhost:${CS_PORT_CONVEX:-10810}}
+      - CONVEX_SITE_ORIGIN=${CONVEX_SITE_ORIGIN:-http://localhost:${CS_PORT_SITE_PROXY:-10815}}
+      - DISABLE_METRICS_ENDPOINT=${DISABLE_METRICS_ENDPOINT:-true}
+      - DOCUMENT_RETENTION_DELAY=${DOCUMENT_RETENTION_DELAY:-172800}
+      - DO_NOT_REQUIRE_SSL
+      - RUST_LOG=${RUST_LOG:-info}
+    # Force IPv4 resolution for host.docker.internal. Docker Desktop on macOS
+    # otherwise hands back an IPv6 ULA that the container can't route to, so
+    # the Convex action's fetch() to the host sidecar fails with
+    # "Network is unreachable (os error 101)".
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: curl -f http://localhost:${CS_PORT_CONVEX:-10810}/version
+      interval: 5s
+      start_period: 10s
+
+  # ── Convex Dashboard ────────────────────────────────────────────────────────
+  convexDB-dashboard:
+    image: ghcr.io/get-convex/convex-dashboard:latest
+    container_name: cs-convexDB-dashboard
+    stop_grace_period: 10s
+    stop_signal: SIGINT
+    ports:
+      - "${CS_PORT_DASHBOARD:-10817}:6791"
+    environment:
+      - NEXT_PUBLIC_DEPLOYMENT_URL=${NEXT_PUBLIC_DEPLOYMENT_URL:-http://localhost:${CS_PORT_CONVEX:-10810}}
+    depends_on:
+      convexDB-backend:
+        condition: service_healthy
+
+  # ── Next.js frontend (prod mode via Docker — optional) ──────────────────────
+  # The Claude extraction sidecar (api-node/) runs as a HOST process so it can
+  # access the macOS Keychain for the Claude OAuth token. Start it with
+  # `cd api-node && npm install && npm run dev`.
+  web:
+    profiles: [prod]
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    container_name: cs-web
+    ports:
+      - "${CS_PORT_WEB:-10813}:3000"
+    volumes:
+      - ./web/src:/app/src
+      - ./web/convex:/app/convex
+    env_file: .env
